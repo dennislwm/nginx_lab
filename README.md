@@ -47,7 +47,7 @@ sudo yum update -y
 
 Add a NGINX yum repository and create a file named `/etc/yum.repos.d/nginx.repo` with `sudo vim` command, and paste the following below:
 
-```
+```nginx
 [nginx]
 name=nginx repo
 baseurl=https://nginx.org/packages/centos/7/$basearch/
@@ -82,7 +82,7 @@ Before we begin, we need to understand what a **directive** is. There are TWO (2
 1. **Single** - this is any keyword that begins on a single line. 
 2. **Block** - this is any keyword that begins on a line followed by a block enclosed by `{ }`. 
 
-```conf
+```nginx
 user  nginx;
 worker_processes  1;
 
@@ -134,11 +134,12 @@ An important explanation for the directive `include /etc/nginx/conf.d/*.conf`.
 
 First, remove the `conf.d/default.conf` file with `sudo rm` command, and create a file named `conf.d/default.conf` with `sudo vim` command, and paste the following below:
 
-```conf
+```nginx
 server {
   listen 80 default_server;
   root /usr/share/nginx/html;
   server_name _;
+  # nameless server _
 }
 ```
 
@@ -166,7 +167,7 @@ curl localhost
 
 To help us understand the basic SELINUX security, we will set up a second virtual host. Create a file named `conf.d/example.com.conf` with `sudo vim` command, and paste the following below:
 
-```conf
+```nginx
 server {
   listen 80;
   root /var/www/example.com/html;
@@ -238,7 +239,7 @@ By default, NGINX automatically creates and serves a `404` html page if a web pa
 
 Open the file named `conf.d/default.conf` with `sudo vim` command, and paste the following below:
 
-```conf
+```nginx
 server {
   # ...
 
@@ -269,7 +270,7 @@ For example, if someone tries to access `admin.html`, it will deny access if the
 
 Open the file named `conf.d/default.conf` with `sudo vim` command, and paste the following below:
 
-```conf
+```nginx
 server {
   # ...
 
@@ -323,19 +324,383 @@ curl -u [USER]:[PASSWORD] localhost/admin.html
 
 #### Generating self-signed certificates
 
+Make a new directory named `/etc/nginx/ssl` with `sudo mkdir`, and we use `openssl` to create both a `private.key` and `public.pem` (or whatever name you choose):
+
+```bash
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/nginx/ssl/private.key -out /etc/nginx/ssl/public.pem
+```
+
+Accept the default values when prompted, however if you are using Nginx on a production server then you should use a third-party signed certificate, such as Let's Encrypt.
+
 #### Configuring the host for SSL/TLS/HTTPS
+
+Change the default server configuration to handle HTTPS connections. For this we use the `ngx_http_ssl_module`.
+
+Open the file named `conf.d/default.conf` with `sudo vim` command. Add a second `listen` directive and both the `private.key` and `public.pem`.
+
+```nginx
+server {
+  listen 80 default_server;
+  listen 443 ssl;
+  server_name _;
+  root /user/share/nginx/html;
+
+  # ssl
+  ssl_certificate /etc/nginx/ssl/public.pem;
+  ssl_certificate_key /etc/nginx/ssl/private.key;
+
+  # location..
+  location = /admin.html {
+    auth_basic "Login Required";
+    auth_basic_user_file /etc/nginx/.htpasswd
+  }
+
+  # error..
+  error_page 404              /404.html;
+  error_page 500 502 503 504  /50x.html;
+}
+```
+Validate and reload our virtual host configuration files with `nginx -t` command and `systemctl reload nginx` respectively.
+
+Test the server by navigating to `https://[IP_ADDRESS]` of your NGINX cloud server. Ignore the message "Your connection is not secure" as we're using a self-signed certificate.
+
+Alternatively, you can test your server using `curl -k https://localhost`.
 
 ### NGINX Rewrites
 
+Rewrite rules allow us to modify the URL as it's coming in. We can either modify and then redirect it so that the URL matches what we expect or we can modify and then pass it to our `location` block directive so that it can be handled.
+
 #### Cleaning up URLS
 
+In this lab, we will remove the file types, e.g. `.html`, from a URL and still have the content served. This is kind of a vanity thing where we don't want the file type showing in the URL address.
+
+For this we use the `ngx_http_rewrite_module`, specifically we will use the `rewrite` single directive. You can chain `rewrite` rules together.
+
+Open the file named `conf.d/default.conf` with `sudo vim` command. Add a `rewrite` directive.
+
+```nginx
+server {
+  # listen ...
+
+  # ssl...
+
+  # rewrite..
+  rewrite ^(/.*)\.html(\?.*)?$ $1$2 redirect;
+  # [REG_EXPR]
+  #   ^ starts with
+  #   (/.*) slash followed by any number of chars (group $1)
+  #   \.html file type .html
+  #   (\?.*)? query followed by any number of chars (optional group $2)
+  #   $ ends with
+  # [SUBSTITUTE]
+  #   $1$2 for example /admin.html?key=value => /admin?key=value
+  # [FLAG]
+  #   redirect sends another inbound to our server with new URL (301 non-permanent)
+  
+  rewrite ^/(.*)/$ /$1 redirect;
+  # [REG_EXPR]
+  #   ^/ starts with /
+  #   (.*) any number of chars (group $1)
+  #   /$ ends with /
+  # [SUBSTITUTE]
+  #   /$1 for example /admin/ => /admin
+  # [FLAG]
+  #   redirect sends another inbound to our server with new URL (301 non-permanent)
+
+  # location..
+
+  # error..
+}
+```
+Validate and reload our virtual host configuration files with `nginx -t` command and `systemctl reload nginx` respectively.
+
+Test the server by navigating to `https://[IP_ADDRESS]` of your NGINX cloud server. You should see an error "The page isn't redirecting properly" because we didn't specify how to handle the new URLs that we rewrote.
+
+For this we use the `ngx_http_core_module`, specifically we use the `try_files` that will allow us to take a URI and serve the files on disk. You can chain multiple files on disk until it finds a valid file.
+
+Open the file named `conf.d/default.conf` with `sudo vim` command. Add a second `location` block directive with a `try_files` single directive.
+
+```nginx
+server {
+  # listen ...
+
+  # ssl...
+
+  # rewrite..
+
+  # location..
+  location / {
+    try_files $uri/index.html $uri.html $uri/ $uri =404;
+  }
+  # $uri contains your new URL that you rewrote. For example, assume $uri = /admin
+  #   $uri/index.html => /admin/index.html (file 1)
+  #   $uri.html => /admin.html (file 2)
+  #   $uri/ => /admin/ (file 3)
+  #   =404 returns error_page 404
+
+  location = /admin {
+  # remove .html above and add try_files single directive
+    auth_basic "Login Required";
+    auth_basic_user_file /etc/nginx/.htpasswd
+    try_files $uri/index.html $uri.html $uri/ $uri =404;
+  }
+
+  # error..
+}
+```
+
+Also, modify the previous `location` block by removing the `.html` from `= /admin` and add a `try_files` single directive. The `location` blocks `/` and `= /admin` will take inbound URLs `/` and `/admin` respectively and serve the same files on disk.
+
+Validate and reload our virtual host configuration files with `nginx -t` command and `systemctl reload nginx` respectively.
+
+Test the server by navigating to `https://[IP_ADDRESS]/admin.html` of your NGINX cloud server. You should see the new URL address as `https://[IP_ADDRESS]/admin`.
+
 #### Redirecting all traffic to HTTPS
+
+We can use `ngx_http_rewrite_module` to redirect all inbound requests to HTTPS, specifically we will use the `return` single directive.
+
+Open the file named `conf.d/default.conf` with `sudo vim` command. Add a second `server` block directive to separate the ports `80` and `443`.
+
+```nginx
+server {
+  # listen..
+  listen 80 default_server;
+  server_name _;
+  return 301 https://$host$request_uri;
+  # return 
+  #   [CODE] sends another inbound to our server  (301 non-permanent)
+  #   [URL] new HTTPS url
+  #     $host in this order of precedence: host name from the request line, or host name 
+  #       from the “Host” request header field, or the server name matching a request
+  #     $request_uri full original request URI (with arguments)
+}
+
+server {
+  # listen..
+  listen 443 ssl;
+  server_name _;
+  root /user/share/nginx/html;
+
+  # ssl..
+
+  # rewrite..
+
+  # location..
+
+  # error..
+}
+```
+
+Validate and reload our virtual host configuration files with `nginx -t` command and `systemctl reload nginx` respectively.
+
+Test the server by navigating to `http://[IP_ADDRESS]/admin.html` of your NGINX cloud server. You should see the new URL address as `https://[IP_ADDRESS]/admin`.
 
 ### NGINX Modules
 
 #### Overview of NGINX modules
 
+So far in this lab we have been using Nginx built-in modules. However, we can add an external module to the folder `/etc/nginx/modules`.
+
+From Nginx version 1.9.11, dynamic modules allow you to add functionality without recompiling Nginx. For example, `ngx_http_image_filter_module` is not built by default, but we could enable it with a configuration parameter.
+
+Show the Nginx configuration parameters and show only modules in a line format.
+
+```bash
+nginx -V
+nginx -V 2>%1 | tr -- - '\n' | grep _module
+```
+
+If we want a smaller Nginx binary executable, we could remove `mail_*` and `stream_*` modules by removing their respective configuration parameters.
+
 #### Adding functionality to NGINX with dynamic modules
+
+For this we use Nginx core functionality, specifically we will use the `load_module` single directive to load dynamic modules with a `.so` extension. We will add a third-party firewall module **ModSecurity** by compiling the dynamic module and then including it by using the `load_module` single directive.
+
+Download developer tools and build packages.
+
+```bash
+yum groupinstall 'Development tools'
+yum install -y \
+geoip-devel \
+libcurl-devel \
+libxml2-devel \
+libxslt-devel \
+libgb-devel \
+lmdb-devel \
+openssl-devel \
+pcre-devel \
+perl-ExtUtils-Embed \
+yajl-devel \
+zlib-devel
+```
+
+Download and build the source code for ModSecurity.
+
+```bash
+cd /opt
+git clone --depth 1 -b v3/master https://github.com/SpiderLabs/ModSecurity.git
+cd ModSecurity
+git submodule init
+git submodule update
+./build.sh
+```
+
+Check if compile successful with `echo $?` which should return a `0`.
+
+Configure the ModSecurity with default values, then compile and install it.
+
+```bash
+./configure
+make
+make install
+```
+
+Download both Nginx wrapper for ModSecurity and Nginx source code.
+
+```bash
+cd ../
+git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git
+wget http://nginx.org/download/nginx-[VERSION].tar.gz
+tar zxvf nginx-[VERSION].tar.gz
+```
+
+Configure Nginx with additional Nginx wrapper for ModSecurity, then compile the module.
+
+```bash
+cd nginx-[VERSION]
+./configure --with-compat --add-dynamic-module=../ModSecurity-nginx
+make modules
+```
+
+Check if compile successful for the file `./objs/ngx_http_modsecurity_module.so`. Copy this file to `/etc/nginx/modules` with `sudo cp`.
+
+Open the file named `/etc/nginx/nginx.conf` with `sudo vim` command. Add a `load_module` single directive before both the `events` and `http` block directives.
+
+```nginx
+# ...
+
+# Load ModSecurity dynamic module
+load_module /etc/nginx/modules/ngx_http_modsecurity_module.so;
+
+# events..
+
+# http..
+```
+
+Validate with `nginx -t` command. Then, copy a default ModSecurity configuration file to a new folder.
+
+```bash
+mkdir /etc/nginx/modsecurity
+cp /opt/ModSecurity/modsecurity.conf-recommended /etc/nginx/modsecurity/modsecurity.conf
+cp unicode.mapping /etc/nginx/modsecurity/unicode.mapping
+```
+
+Open the file named `/etc/nginx/modsecurity/modsecurity.conf` with `sudo vim` command. Find the line below and change it as follows:
+
+```nginx
+SecAuditLog /var/log/nginx/modsec_audit.log
+```
+
+Open the file named `conf.d/default.conf` with `sudo vim` command. Add both a `modsecurity` and `modsecurity_rules_file` single directives under `server` block directive that listens on port `443`.
+
+```nginx
+server {
+  # listen..
+  listen 443 ssl;
+  server_name _;
+  root /user/share/nginx/html;
+
+  # dynamic module
+  modsecurity on;
+  modsecurity_rules_file /etc/nginx/modsecurity/modsecurity.conf;
+  
+  # ssl...
+
+  # rewrite..
+
+  # location..
+
+  # error..
+}
+```
+
+Validate and reload our virtual host configuration files with `nginx -t` command and `systemctl reload nginx` respectively.
+
+The final `conf.d/default.conf` file.
+
+```nginx
+server {
+  # listen..
+  listen 80 default_server;
+  server_name _;
+  return 301 https://$host$request_uri;
+  # return 
+  #   [CODE] sends another inbound to our server  (301 non-permanent)
+  #   [URL] new HTTPS url
+  #     $host in this order of precedence: host name from the request line, or host name 
+  #       from the “Host” request header field, or the server name matching a request
+  #     $request_uri full original request URI (with arguments)
+}
+
+server {
+  # listen
+  listen 443 ssl;
+  server_name _;
+  root /user/share/nginx/html;
+
+  # dynamic module
+  modsecurity on;
+  modsecurity_rules_file /etc/nginx/modsecurity/modsecurity.conf;
+  
+  # ssl
+  ssl_certificate /etc/nginx/ssl/public.pem;
+  ssl_certificate_key /etc/nginx/ssl/private.key;
+
+  # rewrite
+  rewrite ^(/.*)\.html(\?.*)?$ $1$2 redirect;
+  # [REG_EXPR]
+  #   ^ starts with
+  #   (/.*) slash followed by any number of chars (group $1)
+  #   \.html file type .html
+  #   (\?.*)? query followed by any number of chars (optional group $2)
+  #   $ ends with
+  # [SUBSTITUTE]
+  #   $1$2 for example /admin.html?key=value => /admin?key=value
+  # [FLAG]
+  #   redirect sends another inbound to our server with new URL (301 non-permanent)
+  
+  rewrite ^/(.*)/$ /$1 redirect;
+  # [REG_EXPR]
+  #   ^/ starts with /
+  #   (.*) any number of chars (group $1)
+  #   /$ ends with /
+  # [SUBSTITUTE]
+  #   /$1 for example /admin/ => /admin
+  # [FLAG]
+  #   redirect sends another inbound to our server with new URL (301 non-permanent)
+
+  # location
+  location / {
+    try_files $uri/index.html $uri.html $uri/ $uri =404;
+  }
+  # $uri contains your new URL that you rewrote. For example, assume $uri = /admin
+  #   $uri/index.html => /admin/index.html (file 1)
+  #   $uri.html => /admin.html (file 2)
+  #   $uri/ => /admin/ (file 3)
+  #   =404 returns error_page 404
+
+  location = /admin {
+  # remove .html above and add try_files single directive
+    auth_basic "Login Required";
+    auth_basic_user_file /etc/nginx/.htpasswd
+    try_files $uri/index.html $uri.html $uri/ $uri =404;
+  }
+
+  # error
+  error_page 404              /404.html;
+  error_page 500 502 503 504  /50x.html;
+}
+```
 
 ### Reverse Proxy
 
@@ -351,7 +716,7 @@ The `proxy_pass` is a single directive that can exists within `location` context
 
 We will set up a separate virtual host. Create a file named `conf.d/photos.example.com.conf` with `sudo vim` command, and paste the following below:
 
-```conf
+```nginx
 server {
   listen 80;
   server_name photos.example.com;
